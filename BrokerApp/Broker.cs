@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.IO;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
@@ -6,432 +7,503 @@ namespace BrokerApp;
 
 public class Broker
 {
-     private const int PORT = 5000;
+    private const int PORT = 5000;
 
-     private readonly TcpListener listener;
+    private readonly TcpListener listener;
 
-     private readonly List<ClientConnection> clients = new();
+    private readonly List<ClientConnection> clients = new();
 
-     private readonly List<SubscriberState> subscribers = new();
+    private readonly List<SubscriberState> subscribers = new();
 
-     public Broker()
-     {
-          listener = new TcpListener(
-              IPAddress.Any,
-              PORT);
-     }
+    public Broker()
+    {
+        listener = new TcpListener(
+            IPAddress.Any,
+            PORT);
+    }
 
-     public async Task StartAsync()
-     {
-          listener.Start();
+    public async Task StartAsync()
+    {
+        listener.Start();
 
-          Console.WriteLine("=================================");
-          Console.WriteLine("          BROKER APP");
-          Console.WriteLine("=================================");
-          Console.WriteLine("Broker started.");
-          Console.WriteLine($"Listening on port {PORT}...");
-          Console.WriteLine();
+        Console.WriteLine("=================================");
+        Console.WriteLine("          BROKER APP");
+        Console.WriteLine("=================================");
+        Console.WriteLine("Broker started.");
+        Console.WriteLine($"Listening on port {PORT}...");
+        Console.WriteLine();
 
-          while (true)
-          {
-               TcpClient client =
-                   await listener.AcceptTcpClientAsync();
+        while (true)
+        {
+            TcpClient client =
+                await listener.AcceptTcpClientAsync();
 
-               _ = HandleClient(client);
-          }
-     }
+            _ = HandleClient(client);
+        }
+    }
 
-     private async Task HandleClient(TcpClient client)
-     {
-          NetworkStream stream = client.GetStream();
+    private async Task HandleClient(
+        TcpClient client)
+    {
+        NetworkStream stream =
+            client.GetStream();
 
-          byte[] buffer = new byte[1024];
+        Encoding encoding =
+            new UTF8Encoding(false);
 
-          ClientConnection? connection = null;
+        using StreamReader reader =
+            new StreamReader(
+                stream,
+                encoding,
+                detectEncodingFromByteOrderMarks: true,
+                leaveOpen: true);
 
-          try
-          {
-               int bytesRead =
-                   await stream.ReadAsync(buffer);
+        using StreamWriter writer =
+            new StreamWriter(
+                stream,
+                encoding,
+                leaveOpen: true)
+            {
+                AutoFlush = true
+            };
 
-               if (bytesRead == 0)
-               {
-                    return;
-               }
+        ClientConnection? connection = null;
 
-               string identification =
-                   Encoding.UTF8.GetString(
-                       buffer,
-                       0,
-                       bytesRead);
+        try
+        {
+            // The first line identifies the client.
+            //
+            // PUBLISHER|pub1
+            // SUBSCRIBER|sub1
 
-               string[] parts =
-                   identification.Split('|');
+            string? identification =
+                await reader.ReadLineAsync();
 
-               if (parts.Length != 2)
-               {
-                    Console.WriteLine(
-                        "Invalid client identification.");
+            if (string.IsNullOrWhiteSpace(
+                identification))
+            {
+                return;
+            }
 
-                    client.Close();
-                    return;
-               }
+            string[] parts =
+                identification.Split('|');
 
-               string clientType = parts[0];
-               string clientId = parts[1];
+            if (parts.Length != 2)
+            {
+                Console.WriteLine(
+                    "Invalid client identification.");
 
-               connection = new ClientConnection
-               {
-                    Client = client,
-                    Type = clientType,
-                    Id = clientId
-               };
+                client.Close();
 
-               clients.Add(connection);
+                return;
+            }
 
-               Console.WriteLine(
-                   $"{clientType} connected: {clientId}");
+            string clientType =
+                parts[0];
 
-               // If this is a subscriber, restore its state.
-               if (clientType == "SUBSCRIBER")
-               {
-                    SubscriberState? subscriberState =
-                        subscribers.FirstOrDefault(
-                            s => s.SubscriberId == clientId);
+            string clientId =
+                parts[1];
 
-                    if (subscriberState == null)
-                    {
-                         subscriberState = new SubscriberState
-                         {
-                              SubscriberId = clientId
-                         };
+            connection = new ClientConnection
+            {
+                Client = client,
+                Writer = writer,
+                Type = clientType,
+                Id = clientId
+            };
 
-                         subscribers.Add(subscriberState);
+            clients.Add(connection);
 
-                         Console.WriteLine(
-                             $"Created subscriber state for " +
-                             $"{clientId}");
-                    }
-                    else
-                    {
-                         Console.WriteLine(
-                             $"Restored subscriber state for " +
-                             $"{clientId}");
+            Console.WriteLine(
+                $"{clientType} connected: {clientId}");
 
-                         connection.SubscribedPublisherId =
-                             subscriberState.SubscribedPublisherId;
+            // Restore subscriber state.
+            if (clientType == "SUBSCRIBER")
+            {
+                SubscriberState? subscriberState =
+                    subscribers.FirstOrDefault(
+                        s => s.SubscriberId == clientId);
 
-                         // Send pending messages after reconnecting.
-                         await SendPendingMessages(
-                             connection,
-                             subscriberState);
-                    }
-               }
+                if (subscriberState == null)
+                {
+                    subscriberState =
+                        new SubscriberState
+                        {
+                            SubscriberId = clientId
+                        };
 
-               while (true)
-               {
-                    bytesRead =
-                        await stream.ReadAsync(buffer);
-
-                    if (bytesRead == 0)
-                    {
-                         break;
-                    }
-
-                    string message =
-                        Encoding.UTF8.GetString(
-                            buffer,
-                            0,
-                            bytesRead);
-
-                    if (connection.Type == "PUBLISHER")
-                    {
-                         await HandlePublisherMessage(
-                             connection,
-                             message);
-                    }
-                    else if (connection.Type == "SUBSCRIBER")
-                    {
-                         await HandleSubscriberCommand(
-                             connection,
-                             message);
-                    }
-               }
-          }
-          catch (Exception ex)
-          {
-               Console.WriteLine(
-                   $"Error: {ex.Message}");
-          }
-          finally
-          {
-               if (connection != null)
-               {
-                    clients.Remove(connection);
+                    subscribers.Add(
+                        subscriberState);
 
                     Console.WriteLine(
-                        $"{connection.Type} disconnected: " +
-                        $"{connection.Id}");
-               }
+                        $"Created subscriber state for " +
+                        $"{clientId}");
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"Restored subscriber state for " +
+                        $"{clientId}");
 
-               client.Close();
+                    connection.SubscribedPublisherId =
+                        subscriberState
+                            .SubscribedPublisherId;
 
-               Console.WriteLine();
-          }
-     }
+                    // Send pending messages after reconnecting.
+                    await SendPendingMessages(
+                        connection,
+                        subscriberState);
+                }
+            }
 
-     private async Task HandlePublisherMessage(
-         ClientConnection publisher,
-         string message)
-     {
-          string[] parts =
-              message.Split('|', 2);
+            // Every ReadLineAsync() reads exactly one
+            // framed message.
+            while (true)
+            {
+                string? message =
+                    await reader.ReadLineAsync();
 
-          if (parts.Length != 2)
-          {
-               return;
-          }
+                // null means that the client disconnected.
+                if (message == null)
+                {
+                    break;
+                }
 
-          string publisherName = parts[0];
-          string content = parts[1];
+                // Ignore empty lines.
+                if (string.IsNullOrWhiteSpace(
+                    message))
+                {
+                    continue;
+                }
 
-          // Remember the publisher's friendly name.
-          publisher.PublisherName = publisherName;
+                if (connection.Type == "PUBLISHER")
+                {
+                    await HandlePublisherMessage(
+                        connection,
+                        message);
+                }
+                else if (connection.Type == "SUBSCRIBER")
+                {
+                    await HandleSubscriberCommand(
+                        connection,
+                        message);
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"Unknown client type: " +
+                        $"{connection.Type}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"Error: {ex.Message}");
+        }
+        finally
+        {
+            if (connection != null)
+            {
+                clients.Remove(
+                    connection);
 
-          Console.WriteLine(
-              $"Message from {publisherName}: {content}");
+                Console.WriteLine(
+                    $"{connection.Type} disconnected: " +
+                    $"{connection.Id}");
+            }
 
-          List<SubscriberState> subscribedSubscribers =
-              subscribers
-                  .Where(s =>
-                      s.SubscribedPublisherId ==
-                      publisher.Id)
-                  .ToList();
+            client.Close();
 
-          foreach (SubscriberState subscriberState
-              in subscribedSubscribers)
-          {
-               PendingMessage pendingMessage =
-                   new PendingMessage
-                   {
-                        MessageId = Guid.NewGuid().ToString(),
-                        PublisherId = publisher.Id,
-                        PublisherName = publisherName,
-                        Content = content
-                   };
+            Console.WriteLine();
+        }
+    }
 
-               // Check whether this subscriber is currently connected.
-               ClientConnection? subscriberConnection =
-                   clients.FirstOrDefault(c =>
-                       c.Type == "SUBSCRIBER" &&
-                       c.Id == subscriberState.SubscriberId);
+    private async Task HandlePublisherMessage(
+        ClientConnection publisher,
+        string message)
+    {
+        string[] parts =
+            message.Split('|', 2);
 
-               if (subscriberConnection != null)
-               {
-                    bool delivered =
-                        await TryDeliverMessage(
-                            subscriberConnection,
-                            pendingMessage);
+        if (parts.Length != 2)
+        {
+            Console.WriteLine(
+                "Invalid publisher message.");
 
-                    if (delivered)
-                    {
-                         Console.WriteLine(
-                             $"Message {pendingMessage.MessageId} " +
-                             $"delivered to " +
-                             $"{subscriberState.SubscriberId}");
-                    }
-                    else
-                    {
-                         subscriberState.PendingMessages.Add(
-                             pendingMessage);
+            return;
+        }
 
-                         Console.WriteLine(
-                             $"Message {pendingMessage.MessageId} " +
-                             $"stored for " +
-                             $"{subscriberState.SubscriberId}");
-                    }
-               }
-               else
-               {
-                    subscriberState.PendingMessages.Add(
+        string publisherName =
+            parts[0];
+
+        string content =
+            parts[1];
+
+        // Remember the publisher's friendly name.
+        publisher.PublisherName =
+            publisherName;
+
+        Console.WriteLine(
+            $"Message from {publisherName}: {content}");
+
+        List<SubscriberState>
+            subscribedSubscribers =
+                subscribers
+                    .Where(s =>
+                        s.SubscribedPublisherId ==
+                        publisher.Id)
+                    .ToList();
+
+        foreach (SubscriberState subscriberState
+            in subscribedSubscribers)
+        {
+            PendingMessage pendingMessage =
+                new PendingMessage
+                {
+                    MessageId =
+                        Guid.NewGuid().ToString(),
+
+                    PublisherId =
+                        publisher.Id,
+
+                    PublisherName =
+                        publisherName,
+
+                    Content =
+                        content
+                };
+
+            // Check whether subscriber is connected.
+            ClientConnection? subscriberConnection =
+                clients.FirstOrDefault(c =>
+                    c.Type == "SUBSCRIBER" &&
+                    c.Id ==
+                    subscriberState.SubscriberId);
+
+            if (subscriberConnection != null)
+            {
+                bool delivered =
+                    await TryDeliverMessage(
+                        subscriberConnection,
                         pendingMessage);
 
+                if (delivered)
+                {
                     Console.WriteLine(
-                        $"Subscriber " +
-                        $"{subscriberState.SubscriberId} is offline. " +
-                        $"Message stored.");
-               }
-          }
-     }
+                        $"Message " +
+                        $"{pendingMessage.MessageId} " +
+                        $"delivered to " +
+                        $"{subscriberState.SubscriberId}");
+                }
+                else
+                {
+                    subscriberState
+                        .PendingMessages
+                        .Add(pendingMessage);
 
-     private async Task HandleSubscriberCommand(
-         ClientConnection subscriber,
-         string command)
-     {
-          string[] parts =
-              command.Split('|');
-
-          if (parts[0] == "SUBSCRIBE" &&
-              parts.Length == 2)
-          {
-               string publisherId = parts[1];
-
-               // Check whether the requested publisher exists.
-               ClientConnection? publisher =
-                   clients.FirstOrDefault(c =>
-                       c.Type == "PUBLISHER" &&
-                       c.Id == publisherId);
-
-               if (publisher == null)
-               {
                     Console.WriteLine(
-                        $"{subscriber.Id} tried to subscribe " +
-                        $"to unknown publisher {publisherId}");
+                        $"Message " +
+                        $"{pendingMessage.MessageId} " +
+                        $"stored for " +
+                        $"{subscriberState.SubscriberId}");
+                }
+            }
+            else
+            {
+                subscriberState
+                    .PendingMessages
+                    .Add(pendingMessage);
 
-                    await SendToClient(
-                        subscriber,
-                        $"SUBSCRIBE_FAILED|{publisherId}");
+                Console.WriteLine(
+                    $"Subscriber " +
+                    $"{subscriberState.SubscriberId} " +
+                    $"is offline. Message stored.");
+            }
+        }
+    }
 
-                    return;
-               }
+    private async Task HandleSubscriberCommand(
+        ClientConnection subscriber,
+        string command)
+    {
+        string[] parts =
+            command.Split('|');
 
-               subscriber.SubscribedPublisherId =
-                   publisherId;
+        if (parts[0] == "SUBSCRIBE" &&
+            parts.Length == 2)
+        {
+            string publisherId =
+                parts[1];
 
-               SubscriberState? subscriberState =
-                   subscribers.FirstOrDefault(
-                       s => s.SubscriberId == subscriber.Id);
+            // Check whether publisher exists.
+            ClientConnection? publisher =
+                clients.FirstOrDefault(c =>
+                    c.Type == "PUBLISHER" &&
+                    c.Id == publisherId);
 
-               if (subscriberState == null)
-               {
-                    subscriberState = new SubscriberState
+            if (publisher == null)
+            {
+                Console.WriteLine(
+                    $"{subscriber.Id} tried to " +
+                    $"subscribe to unknown " +
+                    $"publisher {publisherId}");
+
+                await SendToClient(
+                    subscriber,
+                    $"SUBSCRIBE_FAILED|{publisherId}");
+
+                return;
+            }
+
+            subscriber.SubscribedPublisherId =
+                publisherId;
+
+            SubscriberState? subscriberState =
+                subscribers.FirstOrDefault(
+                    s => s.SubscriberId ==
+                    subscriber.Id);
+
+            if (subscriberState == null)
+            {
+                subscriberState =
+                    new SubscriberState
                     {
-                         SubscriberId = subscriber.Id
+                        SubscriberId =
+                            subscriber.Id
                     };
 
-                    subscribers.Add(subscriberState);
-               }
+                subscribers.Add(
+                    subscriberState);
+            }
 
-               subscriberState.SubscribedPublisherId =
-                   publisherId;
+            subscriberState
+                .SubscribedPublisherId =
+                publisherId;
 
-               Console.WriteLine(
-                   $"{subscriber.Id} subscribed to " +
-                   $"{publisherId}");
+            Console.WriteLine(
+                $"{subscriber.Id} subscribed to " +
+                $"{publisherId}");
 
-               await SendToClient(
-                   subscriber,
-                   $"SUBSCRIBED|{publisherId}");
-          }
-          else if (parts[0] == "UNSUBSCRIBE")
-          {
-               subscriber.SubscribedPublisherId = null;
+            await SendToClient(
+                subscriber,
+                $"SUBSCRIBED|{publisherId}");
+        }
+        else if (parts[0] ==
+                 "UNSUBSCRIBE")
+        {
+            subscriber.SubscribedPublisherId =
+                null;
 
-               SubscriberState? subscriberState =
-                   subscribers.FirstOrDefault(
-                       s => s.SubscriberId == subscriber.Id);
+            SubscriberState? subscriberState =
+                subscribers.FirstOrDefault(
+                    s => s.SubscriberId ==
+                    subscriber.Id);
 
-               if (subscriberState != null)
-               {
-                    subscriberState.SubscribedPublisherId = null;
-               }
+            if (subscriberState != null)
+            {
+                subscriberState
+                    .SubscribedPublisherId = null;
+            }
 
-               Console.WriteLine(
-                   $"{subscriber.Id} unsubscribed.");
+            Console.WriteLine(
+                $"{subscriber.Id} unsubscribed.");
 
-               await SendToClient(
-                   subscriber,
-                   "UNSUBSCRIBED");
-          }
-     }
+            await SendToClient(
+                subscriber,
+                "UNSUBSCRIBED");
+        }
+    }
 
-     private async Task<bool> TryDeliverMessage(
-         ClientConnection subscriber,
-         PendingMessage message)
-     {
-          try
-          {
-               string messageToSend =
-                   $"MESSAGE|{message.PublisherName}|" +
-                   $"{message.Content}";
+    private async Task<bool> TryDeliverMessage(
+        ClientConnection subscriber,
+        PendingMessage message)
+    {
+        try
+        {
+            // One MESSAGE = one complete line.
+            string messageToSend =
+                $"MESSAGE|" +
+                $"{message.MessageId}|" +
+                $"{message.PublisherName}|" +
+                $"{message.Content}";
 
-               byte[] messageBytes =
-                   Encoding.UTF8.GetBytes(
-                       messageToSend);
+            await subscriber.Writer.WriteLineAsync(
+                messageToSend);
 
-               NetworkStream stream =
-                   subscriber.Client.GetStream();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
-               await stream.WriteAsync(messageBytes);
+    private async Task SendPendingMessages(
+        ClientConnection subscriber,
+        SubscriberState subscriberState)
+    {
+        if (subscriberState
+            .PendingMessages
+            .Count == 0)
+        {
+            return;
+        }
 
-               return true;
-          }
-          catch
-          {
-               return false;
-          }
-     }
+        Console.WriteLine(
+            $"Sending " +
+            $"{subscriberState.PendingMessages.Count} " +
+            $"pending message(s) to " +
+            $"{subscriber.Id}...");
 
-     private async Task SendPendingMessages(
-         ClientConnection subscriber,
-         SubscriberState subscriberState)
-     {
-          if (subscriberState.PendingMessages.Count == 0)
-          {
-               return;
-          }
+        List<PendingMessage>
+            deliveredMessages = new();
 
-          Console.WriteLine(
-              $"Sending {subscriberState.PendingMessages.Count} " +
-              $"pending message(s) to {subscriber.Id}...");
+        foreach (PendingMessage message
+            in subscriberState.PendingMessages)
+        {
+            bool delivered =
+                await TryDeliverMessage(
+                    subscriber,
+                    message);
 
-          List<PendingMessage> deliveredMessages =
-              new();
+            if (delivered)
+            {
+                deliveredMessages.Add(
+                    message);
 
-          foreach (PendingMessage message
-              in subscriberState.PendingMessages)
-          {
-               bool delivered =
-                   await TryDeliverMessage(
-                       subscriber,
-                       message);
+                Console.WriteLine(
+                    $"Pending message " +
+                    $"{message.MessageId} " +
+                    $"delivered to " +
+                    $"{subscriber.Id}");
+            }
+            else
+            {
+                Console.WriteLine(
+                    $"Could not deliver pending " +
+                    $"message " +
+                    $"{message.MessageId}");
 
-               if (delivered)
-               {
-                    deliveredMessages.Add(message);
+                break;
+            }
+        }
 
-                    Console.WriteLine(
-                        $"Pending message {message.MessageId} " +
-                        $"delivered to {subscriber.Id}");
-               }
-               else
-               {
-                    Console.WriteLine(
-                        $"Could not deliver pending message " +
-                        $"{message.MessageId}");
+        foreach (PendingMessage message
+            in deliveredMessages)
+        {
+            subscriberState
+                .PendingMessages
+                .Remove(message);
+        }
+    }
 
-                    break;
-               }
-          }
-
-          foreach (PendingMessage message
-              in deliveredMessages)
-          {
-               subscriberState.PendingMessages.Remove(
-                   message);
-          }
-     }
-
-     private async Task SendToClient(
-         ClientConnection client,
-         string message)
-     {
-          NetworkStream stream =
-              client.Client.GetStream();
-
-          byte[] bytes =
-              Encoding.UTF8.GetBytes(message);
-
-          await stream.WriteAsync(bytes);
-     }
+    private async Task SendToClient(
+        ClientConnection client,
+        string message)
+    {
+        // WriteLineAsync adds the newline delimiter.
+        await client.Writer.WriteLineAsync(
+            message);
+    }
 }

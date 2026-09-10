@@ -1,124 +1,140 @@
-﻿using System.Net.Sockets;
+﻿using System.IO;
+using System.Net.Sockets;
 using System.Text;
 
 namespace PublisherApp;
 
 public class PublisherClient
 {
-     private const string BROKER_ADDRESS = "127.0.0.1";
-     private const int BROKER_PORT = 5000;
+    private const string BROKER_ADDRESS = "127.0.0.1";
+    private const int BROKER_PORT = 5000;
 
-     public async Task StartAsync()
-     {
-          Console.WriteLine("=================================");
-          Console.WriteLine("        PUBLISHER APP");
-          Console.WriteLine("=================================");
-          Console.WriteLine();
+    public async Task StartAsync()
+    {
+        Console.WriteLine("=================================");
+        Console.WriteLine("        PUBLISHER APP");
+        Console.WriteLine("=================================");
+        Console.WriteLine();
 
-          Console.Write("Enter Publisher ID: ");
+        Console.Write("Enter Publisher ID: ");
 
-          string? publisherId =
-              Console.ReadLine();
+        string? publisherId =
+            Console.ReadLine();
 
-          if (string.IsNullOrWhiteSpace(publisherId))
-          {
-               Console.WriteLine(
-                   "Publisher ID cannot be empty.");
+        if (string.IsNullOrWhiteSpace(publisherId))
+        {
+            Console.WriteLine(
+                "Publisher ID cannot be empty.");
 
-               return;
-          }
+            return;
+        }
 
-          Console.Write("Enter Publisher Name: ");
+        Console.Write("Enter Publisher Name: ");
 
-          string? publisherName =
-              Console.ReadLine();
+        string? publisherName =
+            Console.ReadLine();
 
-          if (string.IsNullOrWhiteSpace(publisherName))
-          {
-               Console.WriteLine(
-                   "Publisher name cannot be empty.");
+        if (string.IsNullOrWhiteSpace(publisherName))
+        {
+            Console.WriteLine(
+                "Publisher name cannot be empty.");
 
-               return;
-          }
+            return;
+        }
 
-          try
-          {
-               using TcpClient client =
-                   new TcpClient();
+        try
+        {
+            using TcpClient client =
+                new TcpClient();
 
-               await client.ConnectAsync(
-                   BROKER_ADDRESS,
-                   BROKER_PORT);
+            await client.ConnectAsync(
+                BROKER_ADDRESS,
+                BROKER_PORT);
 
-               Console.WriteLine();
-               Console.WriteLine(
-                   "Connected to Broker.");
+            Console.WriteLine();
+            Console.WriteLine(
+                "Connected to Broker.");
 
-               Console.WriteLine(
-                   $"Publisher: {publisherName}");
+            Console.WriteLine(
+                $"Publisher: {publisherName}");
 
-               Console.WriteLine();
+            Console.WriteLine();
 
-               NetworkStream stream =
-                   client.GetStream();
+            NetworkStream stream =
+                client.GetStream();
 
-               string identification =
-                   $"PUBLISHER|{publisherId}";
+            // StreamWriter is used for TCP message framing.
+            // Each WriteLineAsync() adds a newline delimiter.
+            using StreamWriter writer =
+                new StreamWriter(
+                    stream,
+                    new UTF8Encoding(false),
+                    leaveOpen: true)
+                {
+                    AutoFlush = true
+                };
 
-               byte[] identificationBytes =
-                   Encoding.UTF8.GetBytes(
-                       identification);
+            // Send publisher identification.
+            //
+            // Format:
+            // PUBLISHER|pub1\n
+            //
+            // The newline marks the end of the message.
+            string identification =
+                $"PUBLISHER|{publisherId}";
 
-               await stream.WriteAsync(
-                   identificationBytes);
+            await writer.WriteLineAsync(
+                identification);
 
-               while (true)
-               {
-                    Console.Write(
-                        "Enter message (or 'exit' to quit): ");
+            while (true)
+            {
+                Console.Write(
+                    "Enter message (or 'exit' to quit): ");
 
-                    string? message =
-                        Console.ReadLine();
+                string? message =
+                    Console.ReadLine();
 
-                    if (message == null)
-                    {
-                         continue;
-                    }
+                if (message == null)
+                {
+                    continue;
+                }
 
-                    if (message.ToLower() == "exit")
-                    {
-                         break;
-                    }
+                if (message.ToLower() == "exit")
+                {
+                    break;
+                }
 
-                    if (string.IsNullOrWhiteSpace(message))
-                    {
-                         Console.WriteLine(
-                             "Message cannot be empty.");
-
-                         continue;
-                    }
-
-                    string fullMessage =
-                        $"{publisherName}|{message}";
-
-                    byte[] messageBytes =
-                        Encoding.UTF8.GetBytes(
-                            fullMessage);
-
-                    await stream.WriteAsync(
-                        messageBytes);
-
+                if (string.IsNullOrWhiteSpace(message))
+                {
                     Console.WriteLine(
-                        "Message sent to Broker.");
+                        "Message cannot be empty.");
 
-                    Console.WriteLine();
-               }
-          }
-          catch (Exception ex)
-          {
-               Console.WriteLine(
-                   $"Could not connect to Broker: " +
-                   $"{ex.Message}");
-          }
-     }
+                    continue;
+                }
+
+                // Message format:
+                //
+                // News|Hello\n
+                //
+                // WriteLineAsync adds the newline
+                // delimiter required by the broker.
+                string fullMessage =
+                    $"{publisherName}|{message}";
+
+                await writer.WriteLineAsync(
+                    fullMessage);
+
+                Console.WriteLine(
+                    "Message sent to Broker.");
+
+                Console.WriteLine();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"Could not connect to Broker: " +
+                $"{ex.Message}");
+        }
+    }
 }

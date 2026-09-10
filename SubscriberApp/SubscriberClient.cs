@@ -1,254 +1,337 @@
-﻿using System.Net.Sockets;
+﻿using System.IO;
+using System.Net.Sockets;
 using System.Text;
 
 namespace SubscriberApp;
 
 public class SubscriberClient
 {
-     private const string BROKER_ADDRESS = "127.0.0.1";
-     private const int BROKER_PORT = 5000;
+    private const string BROKER_ADDRESS = "127.0.0.1";
+    private const int BROKER_PORT = 5000;
 
-     public async Task StartAsync()
-     {
-          Console.WriteLine("=================================");
-          Console.WriteLine("       SUBSCRIBER APP");
-          Console.WriteLine("=================================");
-          Console.WriteLine();
+    public async Task StartAsync()
+    {
+        Console.WriteLine("=================================");
+        Console.WriteLine("       SUBSCRIBER APP");
+        Console.WriteLine("=================================");
+        Console.WriteLine();
 
-          string subscriberId = "";
+        string subscriberId = "";
 
-          if (Environment.GetCommandLineArgs().Length > 1)
-          {
-               subscriberId =
-                   Environment.GetCommandLineArgs()[1];
-          }
-          else
-          {
-               Console.Write(
-                   "Enter Subscriber ID: ");
+        if (Environment.GetCommandLineArgs().Length > 1)
+        {
+            subscriberId =
+                Environment.GetCommandLineArgs()[1];
+        }
+        else
+        {
+            Console.Write(
+                "Enter Subscriber ID: ");
 
-               subscriberId =
-                   Console.ReadLine() ?? "";
-          }
+            subscriberId =
+                Console.ReadLine() ?? "";
+        }
 
-          if (string.IsNullOrWhiteSpace(subscriberId))
-          {
-               Console.WriteLine(
-                   "Subscriber ID cannot be empty.");
+        if (string.IsNullOrWhiteSpace(
+            subscriberId))
+        {
+            Console.WriteLine(
+                "Subscriber ID cannot be empty.");
 
-               return;
-          }
+            return;
+        }
 
-          try
-          {
-               using TcpClient client =
-                   new TcpClient();
+        try
+        {
+            using TcpClient client =
+                new TcpClient();
 
-               await client.ConnectAsync(
-                   BROKER_ADDRESS,
-                   BROKER_PORT);
+            await client.ConnectAsync(
+                BROKER_ADDRESS,
+                BROKER_PORT);
 
-               Console.WriteLine();
-               Console.WriteLine(
-                   "Connected to Broker.");
+            Console.WriteLine();
+            Console.WriteLine(
+                "Connected to Broker.");
 
-               Console.WriteLine(
-                   $"Subscriber ID: {subscriberId}");
+            Console.WriteLine(
+                $"Subscriber ID: {subscriberId}");
 
-               Console.WriteLine();
+            Console.WriteLine();
 
-               NetworkStream stream =
-                   client.GetStream();
+            NetworkStream stream =
+                client.GetStream();
 
-               string identification =
-                   $"SUBSCRIBER|{subscriberId}";
+            // StreamReader reads complete framed messages.
+            //
+            // Each message is terminated by \n.
+            using StreamReader reader =
+                new StreamReader(
+                    stream,
+                    new UTF8Encoding(false),
+                    detectEncodingFromByteOrderMarks: true,
+                    leaveOpen: true);
 
-               byte[] identificationBytes =
-                   Encoding.UTF8.GetBytes(
-                       identification);
+            // StreamWriter sends complete framed messages.
+            //
+            // WriteLineAsync() adds \n.
+            using StreamWriter writer =
+                new StreamWriter(
+                    stream,
+                    new UTF8Encoding(false),
+                    leaveOpen: true)
+                {
+                    AutoFlush = true
+                };
 
-               await stream.WriteAsync(
-                   identificationBytes);
+            // Identify subscriber.
+            //
+            // Format:
+            // SUBSCRIBER|sub1\n
+            string identification =
+                $"SUBSCRIBER|{subscriberId}";
 
-               _ = ReceiveMessages(stream);
+            await writer.WriteLineAsync(
+                identification);
 
-               while (true)
-               {
-                    Console.WriteLine(
-                        "=================================");
+            // Start receiving messages from Broker.
+            _ = ReceiveMessages(reader);
 
-                    Console.WriteLine(
-                        "            MENU");
+            while (true)
+            {
+                Console.WriteLine(
+                    "=================================");
 
-                    Console.WriteLine(
-                        "=================================");
+                Console.WriteLine(
+                    "            MENU");
 
-                    Console.WriteLine(
-                        "1. Subscribe to publisher");
+                Console.WriteLine(
+                    "=================================");
 
-                    Console.WriteLine(
-                        "2. Unsubscribe");
+                Console.WriteLine(
+                    "1. Subscribe to publisher");
 
-                    Console.WriteLine(
-                        "3. Exit");
+                Console.WriteLine(
+                    "2. Unsubscribe");
 
-                    Console.WriteLine();
+                Console.WriteLine(
+                    "3. Exit");
 
+                Console.WriteLine();
+
+                Console.Write(
+                    "Choose an option: ");
+
+                string? choice =
+                    Console.ReadLine();
+
+                if (choice == "1")
+                {
                     Console.Write(
-                        "Choose an option: ");
+                        "Enter Publisher ID: ");
 
-                    string? choice =
+                    string? publisherId =
                         Console.ReadLine();
 
-                    if (choice == "1")
+                    if (string.IsNullOrWhiteSpace(
+                        publisherId))
                     {
-                         Console.Write(
-                             "Enter Publisher ID: ");
+                        Console.WriteLine(
+                            "Publisher ID cannot be empty.");
 
-                         string? publisherId =
-                             Console.ReadLine();
-
-                         if (string.IsNullOrWhiteSpace(
-                             publisherId))
-                         {
-                              Console.WriteLine(
-                                  "Publisher ID cannot be empty.");
-
-                              continue;
-                         }
-
-                         string command =
-                             $"SUBSCRIBE|{publisherId}";
-
-                         byte[] commandBytes =
-                             Encoding.UTF8.GetBytes(
-                                 command);
-
-                         await stream.WriteAsync(
-                             commandBytes);
-
-                         Console.WriteLine(
-                             "Subscription request sent.");
-
-                         Console.WriteLine();
-                    }
-                    else if (choice == "2")
-                    {
-                         string command =
-                             "UNSUBSCRIBE";
-
-                         byte[] commandBytes =
-                             Encoding.UTF8.GetBytes(
-                                 command);
-
-                         await stream.WriteAsync(
-                             commandBytes);
-
-                         Console.WriteLine(
-                             "Unsubscribe request sent.");
-
-                         Console.WriteLine();
-                    }
-                    else if (choice == "3")
-                    {
-                         break;
-                    }
-                    else
-                    {
-                         Console.WriteLine(
-                             "Invalid option.");
-
-                         Console.WriteLine();
-                    }
-               }
-          }
-          catch (Exception ex)
-          {
-               Console.WriteLine(
-                   $"Connection error: " +
-                   $"{ex.Message}");
-          }
-     }
-private async Task ReceiveMessages(
-    NetworkStream stream)
-     {
-          byte[] buffer = new byte[1024];
-
-          try
-          {
-               while (true)
-               {
-                    int bytesRead =
-                        await stream.ReadAsync(buffer);
-
-                    if (bytesRead == 0)
-                    {
-                         break;
+                        continue;
                     }
 
-                    string message =
-                        Encoding.UTF8.GetString(
-                            buffer,
-                            0,
-                            bytesRead);
+                    // Subscribe command:
+                    //
+                    // SUBSCRIBE|pub1\n
+                    string command =
+                        $"SUBSCRIBE|{publisherId}";
 
-                    if (message.StartsWith(
-                        "SUBSCRIBED|"))
+                    await writer.WriteLineAsync(
+                        command);
+
+                    Console.WriteLine(
+                        "Subscription request sent.");
+
+                    Console.WriteLine();
+                }
+                else if (choice == "2")
+                {
+                    // Unsubscribe command:
+                    //
+                    // UNSUBSCRIBE\n
+                    string command =
+                        "UNSUBSCRIBE";
+
+                    await writer.WriteLineAsync(
+                        command);
+
+                    Console.WriteLine(
+                        "Unsubscribe request sent.");
+
+                    Console.WriteLine();
+                }
+                else if (choice == "3")
+                {
+                    break;
+                }
+                else
+                {
+                    Console.WriteLine(
+                        "Invalid option.");
+
+                    Console.WriteLine();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"Connection error: " +
+                $"{ex.Message}");
+        }
+    }
+
+    private async Task ReceiveMessages(
+        StreamReader reader)
+    {
+        try
+        {
+            while (true)
+            {
+                // Read exactly one framed message.
+                //
+                // ReadLineAsync() waits until it
+                // encounters the \n delimiter.
+                string? message =
+                    await reader.ReadLineAsync();
+
+                // null means that the Broker
+                // closed the connection.
+                if (message == null)
+                {
+                    break;
+                }
+
+                // Ignore empty messages.
+                if (string.IsNullOrWhiteSpace(
+                    message))
+                {
+                    continue;
+                }
+
+                if (message.StartsWith(
+                    "SUBSCRIBED|"))
+                {
+                    string[] parts =
+                        message.Split('|');
+
+                    if (parts.Length < 2)
                     {
-                         string publisherId =
-                             message.Split('|')[1];
+                        Console.WriteLine(
+                            "Invalid SUBSCRIBED message.");
 
-                         Console.WriteLine();
-                         Console.WriteLine(
-                             $"Successfully subscribed to " +
-                             $"{publisherId}");
-
-                         Console.WriteLine();
+                        continue;
                     }
-                    else if (message.StartsWith(
-                        "SUBSCRIBE_FAILED|"))
+
+                    string publisherId =
+                        parts[1];
+
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"Successfully subscribed to " +
+                        $"{publisherId}");
+
+                    Console.WriteLine();
+                }
+                else if (message.StartsWith(
+                    "SUBSCRIBE_FAILED|"))
+                {
+                    string[] parts =
+                        message.Split('|');
+
+                    if (parts.Length < 2)
                     {
-                         string publisherId =
-                             message.Split('|')[1];
+                        Console.WriteLine(
+                            "Invalid SUBSCRIBE_FAILED message.");
 
-                         Console.WriteLine();
-                         Console.WriteLine(
-                             $"Publisher not found: " +
-                             $"{publisherId}");
-
-                         Console.WriteLine();
+                        continue;
                     }
-                    else if (message ==
-                             "UNSUBSCRIBED")
+
+                    string publisherId =
+                        parts[1];
+
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"Publisher not found: " +
+                        $"{publisherId}");
+
+                    Console.WriteLine();
+                }
+                else if (message ==
+                         "UNSUBSCRIBED")
+                {
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        "Successfully unsubscribed.");
+
+                    Console.WriteLine();
+                }
+                else if (message.StartsWith(
+                    "MESSAGE|"))
+                {
+                    // Current framing protocol:
+                    //
+                    // MESSAGE|MessageId|PublisherName|Content
+                    //
+                    // Split into maximum 4 parts so that
+                    // the message content can contain '|'.
+                    string[] parts =
+                        message.Split('|', 4);
+
+                    if (parts.Length != 4)
                     {
-                         Console.WriteLine();
-                         Console.WriteLine(
-                             "Successfully unsubscribed.");
+                        Console.WriteLine(
+                            "Invalid MESSAGE format.");
 
-                         Console.WriteLine();
+                        continue;
                     }
-                    else if (message.StartsWith(
-                        "MESSAGE|"))
-                    {
-                         string[] parts =
-                             message.Split('|', 3);
 
-                         string publisherName = parts[1];
-                         string content = parts[2];
+                    string messageId =
+                        parts[1];
 
-                         Console.WriteLine();
-                         Console.WriteLine(
-                             $"MESSAGE [{publisherName}]: " +
-                             $"{content}");
+                    string publisherName =
+                        parts[2];
 
-                         Console.WriteLine();
-                    }
-               }
-          }
-          catch
-          {
-               Console.WriteLine(
-                   "Disconnected from Broker.");
-          }
-     }
+                    string content =
+                        parts[3];
+
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"MESSAGE [{publisherName}]: " +
+                        $"{content}");
+
+                    Console.WriteLine(
+                        $"Message ID: {messageId}");
+
+                    Console.WriteLine();
+                }
+                else
+                {
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"Unknown message from Broker: " +
+                        $"{message}");
+
+                    Console.WriteLine();
+                }
+            }
+        }
+        catch
+        {
+            Console.WriteLine(
+                "Disconnected from Broker.");
+        }
+    }
 }
