@@ -8,6 +8,7 @@ public class SubscriberClient
 {
      private const string BROKER_ADDRESS = "127.0.0.1";
      private const int BROKER_PORT = 5000;
+     private readonly HashSet<string> processedMessageIds = new();
 
      public async Task StartAsync()
      {
@@ -321,6 +322,33 @@ public class SubscriberClient
                          string content =
                              parts[3];
 
+                         // -----------------------------
+                         // DEDUPLICATION
+                         // -----------------------------
+                         //
+                         // If this message was already processed, the
+                         // Broker never received our ACK (e.g. we crashed
+                         // right after the local effect). Do NOT repeat
+                         // the local effect — just resend the ACK so the
+                         // Broker can finally clear it from PendingMessages.
+                         if (processedMessageIds.Contains(
+                             messageId))
+                         {
+                              Console.WriteLine();
+                              Console.WriteLine(
+                                  $"Duplicate message " +
+                                  $"{messageId} ignored " +
+                                  $"(already processed). " +
+                                  $"Resending ACK.");
+
+                              Console.WriteLine();
+
+                              await writer.WriteLineAsync(
+                                  $"ACK|{messageId}");
+
+                              continue;
+                         }
+
                          try
                          {
                               // -----------------------------
@@ -355,6 +383,16 @@ public class SubscriberClient
                                        "Simulated local processing failure.");
                               }
 
+                              // Mark as processed BEFORE sending ACK.
+                              //
+                              // If we crash between this line and the
+                              // ACK actually reaching the Broker, the
+                              // redelivered message will be caught by
+                              // the check above instead of repeating
+                              // the local effect.
+                              processedMessageIds.Add(
+                                  messageId);
+
                               // -----------------------------
                               // ACK
                               // -----------------------------
@@ -373,6 +411,11 @@ public class SubscriberClient
                               // -----------------------------
                               // NACK
                               // -----------------------------
+                              //
+                              // NOTE: message is NOT added to
+                              // processedMessageIds here, since the
+                              // local effect did not succeed — a
+                              // retry should actually reprocess it.
 
                               await writer.WriteLineAsync(
                                   $"NACK|{messageId}");
