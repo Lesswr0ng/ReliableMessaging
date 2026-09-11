@@ -9,6 +9,16 @@ public class SubscriberClient
      private const string BROKER_ADDRESS = "127.0.0.1";
      private const int BROKER_PORT = 5000;
      private readonly HashSet<string> processedMessageIds = new();
+     private long nextExpectedSequence = 1;
+
+     private readonly SortedDictionary<long, BufferedMessage>
+         outOfOrderBuffer = new();
+
+     private record BufferedMessage(
+         string MessageId,
+         long SequenceNumber,
+         string PublisherName,
+         string Content);
 
      public async Task StartAsync()
      {
@@ -120,7 +130,10 @@ public class SubscriberClient
                         "2. Unsubscribe");
 
                     Console.WriteLine(
-                        "3. Exit");
+                        "3. View Dead Letter Queue");
+
+                    Console.WriteLine(
+                        "4. Exit");
 
                     Console.WriteLine();
 
@@ -178,6 +191,19 @@ public class SubscriberClient
                          Console.WriteLine();
                     }
                     else if (choice == "3")
+                    {
+                         // DLQ inspection command.
+                         string dlqCommand = "DLQ";
+
+                         await writer.WriteLineAsync(
+                             dlqCommand);
+
+                         Console.WriteLine(
+                             "DLQ inspection request sent.");
+
+                         Console.WriteLine();
+                    }
+                    else if (choice == "4")
                     {
                          break;
                     }
@@ -293,19 +319,57 @@ public class SubscriberClient
                          continue;
                     }
 
+                    // ---------------------------------
+                    // DLQ_ENTRY / DLQ_END
+                    // ---------------------------------
+
+                    if (message.StartsWith(
+                        "DLQ_ENTRY|"))
+                    {
+                         // DLQ_ENTRY|MessageId|Seq|PublisherName|Content|RetryCount
+                         string[] dlqParts =
+                             message.Split('|', 6);
+
+                         if (dlqParts.Length == 6)
+                         {
+                              Console.WriteLine(
+                                  $"  DLQ: [{dlqParts[3]}] " +
+                                  $"seq #{dlqParts[2]} " +
+                                  $"\"{ dlqParts[4]}\" " +
+                                  $"(retries: {dlqParts[5]}, " +
+                                  $"id: {dlqParts[1]})");
+                         }
+
+                         continue;
+                    }
+
+                    if (message == "DLQ_END")
+                    {
+                         Console.WriteLine(
+                             "  --- End of DLQ ---");
+
+                         Console.WriteLine();
+
+                         continue;
+                    }
+
+                    // ---------------------------------
+                    // MESSAGE
+                    // ---------------------------------
+
                     if (message.StartsWith(
                         "MESSAGE|"))
                     {
-                         // Current framing protocol:
+                         // Framing protocol:
                          //
-                         // MESSAGE|MessageId|PublisherName|Content
+                         // MESSAGE|MessageId|SequenceNumber|PublisherName|Content
                          //
-                         // Split into maximum 4 parts so that
+                         // Split into maximum 5 parts so that
                          // the message content can contain '|'.
                          string[] parts =
-                             message.Split('|', 4);
+                             message.Split('|', 5);
 
-                         if (parts.Length != 4)
+                         if (parts.Length != 5)
                          {
                               Console.WriteLine(
                                   "Invalid MESSAGE format.");
@@ -316,11 +380,21 @@ public class SubscriberClient
                          string messageId =
                              parts[1];
 
+                         if (!long.TryParse(
+                             parts[2],
+                             out long sequenceNumber))
+                         {
+                              Console.WriteLine(
+                                  "Invalid sequence number.");
+
+                              continue;
+                         }
+
                          string publisherName =
-                             parts[2];
+                             parts[3];
 
                          string content =
-                             parts[3];
+                             parts[4];
 
                          // -----------------------------
                          // DEDUPLICATION
@@ -337,8 +411,8 @@ public class SubscriberClient
                               Console.WriteLine();
                               Console.WriteLine(
                                   $"Duplicate message " +
-                                  $"{messageId} ignored " +
-                                  $"(already processed). " +
+                                  $"{messageId} (seq #{sequenceNumber}) " +
+                                  $"ignored (already processed). " +
                                   $"Resending ACK.");
 
                               Console.WriteLine();
@@ -349,81 +423,68 @@ public class SubscriberClient
                               continue;
                          }
 
-                         try
+                         // -----------------------------
+                         // ORDERED PROCESSING
+                         // -----------------------------
+                         //
+                         // Process messages in sequence order.
+                         // Buffer ahead-of-order messages.
+
+                         if (sequenceNumber > nextExpectedSequence)
                          {
-                              // -----------------------------
-                              // LOCAL EFFECT
-                              // -----------------------------
-                              //
-                              // This represents successfully
-                              // processing the message.
-                              //
-                              // For now, printing it is our
-                              // local effect.
-
-                              Console.WriteLine();
-                              Console.WriteLine(
-                                  $"MESSAGE [{publisherName}]: " +
-                                  $"{content}");
-
-                              Console.WriteLine(
-                                  $"Message ID: {messageId}");
-
-                              Console.WriteLine();
-
-                              // Simulated processing failure, for
-                              // exercising the NACK/retry path
-                              // end-to-end. Replace with a real
-                              // failure condition once one exists.
-                              if (content.Contains(
-                                  "FAIL",
-                                  StringComparison.OrdinalIgnoreCase))
+                              // Arrived out of order — buffer it.
+                              if (!outOfOrderBuffer.ContainsKey(
+                                  sequenceNumber))
                               {
-                                   throw new Exception(
-                                       "Simulated local processing failure.");
+                                   outOfOrderBuffer[sequenceNumber] =
+                                       new BufferedMessage(
+                                           messageId,
+                                           sequenceNumber,
+                                           publisherName,
+                                           content);
                               }
 
-                              // Mark as processed BEFORE sending ACK.
-                              //
-                              // If we crash between this line and the
-                              // ACK actually reaching the Broker, the
-                              // redelivered message will be caught by
-                              // the check above instead of repeating
-                              // the local effect.
-                              processedMessageIds.Add(
-                                  messageId);
+                              Console.WriteLine();
+                              Console.WriteLine(
+                                  $"Message seq #{sequenceNumber} " +
+                                  $"buffered (waiting for " +
+                                  $"seq #{nextExpectedSequence})");
 
-                              // -----------------------------
-                              // ACK
-                              // -----------------------------
+                              Console.WriteLine();
+
+                              continue;
+                         }
+
+                         if (sequenceNumber < nextExpectedSequence)
+                         {
+                              // Old duplicate — already processed.
+                              Console.WriteLine();
+                              Console.WriteLine(
+                                  $"Old message seq #{sequenceNumber} " +
+                                  $"ignored. Resending ACK.");
+
+                              Console.WriteLine();
 
                               await writer.WriteLineAsync(
                                   $"ACK|{messageId}");
 
-                              Console.WriteLine(
-                                  $"ACK sent for message " +
-                                  $"{messageId}");
-
-                              Console.WriteLine();
+                              continue;
                          }
-                         catch
-                         {
-                              // -----------------------------
-                              // NACK
-                              // -----------------------------
-                              //
-                              // NOTE: message is NOT added to
-                              // processedMessageIds here, since the
-                              // local effect did not succeed — a
-                              // retry should actually reprocess it.
 
-                              await writer.WriteLineAsync(
-                                  $"NACK|{messageId}");
+                         // sequenceNumber == nextExpectedSequence
+                         // Process this message and drain buffer.
+                         await ProcessMessage(
+                             writer,
+                             messageId,
+                             sequenceNumber,
+                             publisherName,
+                             content);
 
-                              Console.WriteLine(
-                                  $"NACK sent for message " +
-                                  $"{messageId}");
-                         }
+                         nextExpectedSequence++;
+
+                         // Drain buffered messages that are
+                         // now in order.
+                         await DrainBuffer(writer);
 
                          continue;
                     }
@@ -440,6 +501,121 @@ public class SubscriberClient
           {
                Console.WriteLine(
                    "Disconnected from Broker.");
+          }
+     }
+
+     private async Task ProcessMessage(
+         StreamWriter writer,
+         string messageId,
+         long sequenceNumber,
+         string publisherName,
+         string content)
+     {
+          try
+          {
+               // -----------------------------
+               // LOCAL EFFECT
+               // -----------------------------
+               //
+               // This represents successfully
+               // processing the message.
+               //
+               // For now, printing it is our
+               // local effect.
+
+               Console.WriteLine();
+               Console.WriteLine(
+                   $"MESSAGE [{publisherName}] " +
+                   $"seq #{sequenceNumber}: " +
+                   $"{content}");
+
+               Console.WriteLine(
+                   $"Message ID: {messageId}");
+
+               Console.WriteLine();
+
+               // Simulated processing failure, for
+               // exercising the NACK/retry path
+               // end-to-end. Replace with a real
+               // failure condition once one exists.
+               if (content.Contains(
+                   "FAIL",
+                   StringComparison.OrdinalIgnoreCase))
+               {
+                    throw new Exception(
+                        "Simulated local processing failure.");
+               }
+
+               // Mark as processed BEFORE sending ACK.
+               //
+               // If we crash between this line and the
+               // ACK actually reaching the Broker, the
+               // redelivered message will be caught by
+               // the deduplication check instead of
+               // repeating the local effect.
+               processedMessageIds.Add(
+                   messageId);
+
+               // -----------------------------
+               // ACK
+               // -----------------------------
+
+               await writer.WriteLineAsync(
+                   $"ACK|{messageId}");
+
+               Console.WriteLine(
+                   $"ACK sent for message " +
+                   $"{messageId} " +
+                   $"(seq #{sequenceNumber})");
+
+               Console.WriteLine();
+          }
+          catch
+          {
+               // -----------------------------
+               // NACK
+               // -----------------------------
+               //
+               // NOTE: message is NOT added to
+               // processedMessageIds here, since the
+               // local effect did not succeed — a
+               // retry should actually reprocess it.
+
+               await writer.WriteLineAsync(
+                   $"NACK|{messageId}");
+
+               Console.WriteLine(
+                   $"NACK sent for message " +
+                   $"{messageId} " +
+                   $"(seq #{sequenceNumber})");
+          }
+     }
+
+     private async Task DrainBuffer(
+         StreamWriter writer)
+     {
+          while (outOfOrderBuffer.ContainsKey(
+              nextExpectedSequence))
+          {
+               BufferedMessage buffered =
+                   outOfOrderBuffer[
+                       nextExpectedSequence];
+
+               outOfOrderBuffer.Remove(
+                   nextExpectedSequence);
+
+               Console.WriteLine(
+                   $"Draining buffered message " +
+                   $"seq #{nextExpectedSequence}");
+
+               await ProcessMessage(
+                   writer,
+                   buffered.MessageId,
+                   buffered.SequenceNumber,
+                   buffered.PublisherName,
+                   buffered.Content);
+
+               nextExpectedSequence++;
           }
      }
 }

@@ -4,6 +4,8 @@ public class PendingMessage
 {
      public string MessageId { get; set; } = "";
 
+     public long SequenceNumber { get; set; }
+
      public string PublisherId { get; set; } = "";
 
      public string PublisherName { get; set; } = "";
