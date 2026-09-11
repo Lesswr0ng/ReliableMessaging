@@ -531,6 +531,59 @@ public class Broker
                await SendToClient(
                    subscriber,
                    "UNSUBSCRIBED");
+
+               return;
+          }
+
+          // ---------------------------------
+          // DLQ (Dead Letter Queue inspection)
+          // ---------------------------------
+
+          if (parts[0] == "DLQ")
+          {
+               List<PendingMessage> deadLetters;
+
+               lock (stateLock)
+               {
+                    SubscriberState? subscriberState =
+                        subscribers.FirstOrDefault(
+                            s => s.SubscriberId ==
+                                subscriber.Id);
+
+                    if (subscriberState == null)
+                    {
+                         deadLetters = new();
+                    }
+                    else
+                    {
+                         deadLetters =
+                             subscriberState
+                                 .DeadLetterMessages
+                                 .ToList();
+                    }
+               }
+
+               Console.WriteLine(
+                   $"DLQ inspection by " +
+                   $"{subscriber.Id}: " +
+                   $"{deadLetters.Count} message(s)");
+
+               foreach (PendingMessage dlqMessage
+                   in deadLetters)
+               {
+                    await SendToClient(
+                        subscriber,
+                        $"DLQ_ENTRY|" +
+                        $"{dlqMessage.MessageId}|" +
+                        $"{dlqMessage.SequenceNumber}|" +
+                        $"{dlqMessage.PublisherName}|" +
+                        $"{dlqMessage.Content}|" +
+                        $"{dlqMessage.RetryCount}");
+               }
+
+               await SendToClient(
+                   subscriber,
+                   "DLQ_END");
           }
      }
 
@@ -636,7 +689,7 @@ public class Broker
                string messageToSend =
                    $"MESSAGE|" +
                    $"{message.MessageId}|" +
-$"{message.SequenceNumber}|" +
+                   $"{message.SequenceNumber}|" +
                    $"{message.PublisherName}|" +
                    $"{message.Content}";
 
@@ -755,7 +808,7 @@ $"{message.SequenceNumber}|" +
                                    continue;
                               }
 
-List<PendingMessage> messagesToDlq =
+                              List<PendingMessage> messagesToDlq =
                                   new();
 
                               foreach (PendingMessage message
@@ -791,21 +844,32 @@ List<PendingMessage> messagesToDlq =
                                    }
                                    else
                                    {
-                                        Console.WriteLine(
-                                            $"Message " +
-                                            $"{message.MessageId} " +
-                                            $"reached maximum retry count " +
-                                            $"for subscriber " +
-                                            $"{subscriberState.SubscriberId}.");
-
-                                        // DLQ will be handled as a
-                                        // separate feature.
-                                        //
-                                        // For now we keep the message
-                                        // in memory.
-                                        message.LastSentAt =
-                                            DateTime.UtcNow;
+                                        // Collect for DLQ move after
+                                        // iteration to avoid modifying
+                                        // PendingMessages during foreach.
+                                        messagesToDlq.Add(message);
                                    }
+                              }
+
+                              // Move exhausted messages to DLQ.
+                              foreach (PendingMessage dlqMessage
+                                  in messagesToDlq)
+                              {
+                                   Console.WriteLine(
+                                       $"Message " +
+                                       $"{dlqMessage.MessageId} " +
+                                       $"(seq #{dlqMessage.SequenceNumber}) " +
+                                       $"moved to DLQ " +
+                                       $"for subscriber " +
+                                       $"{subscriberState.SubscriberId}.");
+
+                                   subscriberState
+                                       .PendingMessages
+                                       .Remove(dlqMessage);
+
+                                   subscriberState
+                                       .DeadLetterMessages
+                                       .Add(dlqMessage);
                               }
                          }
                     }

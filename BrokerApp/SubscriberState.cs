@@ -7,4 +7,6 @@ public class SubscriberState
      public string? SubscribedPublisherId { get; set; }
 
      public List<PendingMessage> PendingMessages { get; set; } = new();
+
+     public List<PendingMessage> DeadLetterMessages { get; set; } = new();
 }
