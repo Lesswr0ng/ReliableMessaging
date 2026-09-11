@@ -353,6 +353,34 @@ public class SubscriberClient
                          continue;
                     }
 
+                    if (message.StartsWith(
+                         "RESYNC|"))
+                    {
+                         string[] parts =
+                             message.Split('|');
+
+                         if (parts.Length == 2 &&
+                             long.TryParse(parts[1], out long resumeSequence))
+                         {
+                              nextExpectedSequence =
+                                  resumeSequence;
+
+                              // Anything buffered from a previous connection
+                              // is meaningless now — it referred to sequence
+                              // numbers under the old expectation.
+                              outOfOrderBuffer.Clear();
+
+                              Console.WriteLine();
+                              Console.WriteLine(
+                                  $"Resynced. Next expected sequence: " +
+                                  $"{resumeSequence}");
+
+                              Console.WriteLine();
+                         }
+
+                         continue;
+                    }
+
                     // ---------------------------------
                     // MESSAGE
                     // ---------------------------------

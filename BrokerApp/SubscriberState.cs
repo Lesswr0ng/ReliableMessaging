@@ -9,4 +9,5 @@ public class SubscriberState
      public List<PendingMessage> PendingMessages { get; set; } = new();
 
      public List<PendingMessage> DeadLetterMessages { get; set; } = new();
+     public long NextSequenceToAssign { get; set; } = 1;
 }

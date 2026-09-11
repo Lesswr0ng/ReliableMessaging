@@ -23,11 +23,6 @@ public class Broker
 
      private readonly List<SubscriberState> subscribers = new();
 
-     // Tracks the next sequence number per publisher.
-     // Key = publisherId, Value = next sequence number.
-     private readonly Dictionary<string, long>
-         publisherSequenceNumbers = new();
-
      // Protects shared Broker state because multiple
      // client handlers and the retry loop can run at once.
      private readonly object stateLock = new();
@@ -184,6 +179,27 @@ public class Broker
                              $"Created subscriber state for " +
                              $"{clientId}");
                     }
+                    long resumeSequence;
+
+                    lock (stateLock)
+                    {
+                         resumeSequence =
+                             subscriberState.PendingMessages.Count > 0
+                                 ? subscriberState.PendingMessages
+                                     .Min(m => m.SequenceNumber)
+                                 : subscriberState.NextSequenceToAssign;
+                    }
+
+                    await SendToClient(
+                        connection,
+                        $"RESYNC|{resumeSequence}");
+
+                    if (subscriberState.PendingMessages.Count > 0)
+                    {
+                         await SendPendingMessages(
+                             connection,
+                             subscriberState);
+                    }
                }
 
                // Every ReadLineAsync() reads exactly one
@@ -295,16 +311,12 @@ public class Broker
 
                lock (stateLock)
                {
-                    if (!publisherSequenceNumbers
-                        .ContainsKey(publisher.Id))
-                    {
-                         publisherSequenceNumbers[
-                             publisher.Id] = 1;
-                    }
-
+                    // One counter per subscriber, incremented only when
+                    // a message is actually queued for THIS subscriber —
+                    // matches what the subscriber's own nextExpectedSequence
+                    // (starting at 1) expects to see.
                     sequenceNumber =
-                        publisherSequenceNumbers[
-                            publisher.Id]++;
+                        subscriberState.NextSequenceToAssign++;
                }
 
                PendingMessage pendingMessage =
