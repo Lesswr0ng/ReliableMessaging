@@ -23,6 +23,11 @@ public class Broker
 
      private readonly List<SubscriberState> subscribers = new();
 
+     // Tracks the next sequence number per publisher.
+     // Key = publisherId, Value = next sequence number.
+     private readonly Dictionary<string, long>
+         publisherSequenceNumbers = new();
+
      // Protects shared Broker state because multiple
      // client handlers and the retry loop can run at once.
      private readonly object stateLock = new();
@@ -286,11 +291,30 @@ public class Broker
           foreach (SubscriberState subscriberState
               in subscribedSubscribers)
           {
+               long sequenceNumber;
+
+               lock (stateLock)
+               {
+                    if (!publisherSequenceNumbers
+                        .ContainsKey(publisher.Id))
+                    {
+                         publisherSequenceNumbers[
+                             publisher.Id] = 1;
+                    }
+
+                    sequenceNumber =
+                        publisherSequenceNumbers[
+                            publisher.Id]++;
+               }
+
                PendingMessage pendingMessage =
                    new PendingMessage
                    {
                         MessageId =
                            Guid.NewGuid().ToString(),
+
+                        SequenceNumber =
+                           sequenceNumber,
 
                         PublisherId =
                            publisher.Id,
@@ -612,6 +636,7 @@ public class Broker
                string messageToSend =
                    $"MESSAGE|" +
                    $"{message.MessageId}|" +
+$"{message.SequenceNumber}|" +
                    $"{message.PublisherName}|" +
                    $"{message.Content}";
 
@@ -729,6 +754,9 @@ public class Broker
                               {
                                    continue;
                               }
+
+List<PendingMessage> messagesToDlq =
+                                  new();
 
                               foreach (PendingMessage message
                                   in subscriberState.PendingMessages)

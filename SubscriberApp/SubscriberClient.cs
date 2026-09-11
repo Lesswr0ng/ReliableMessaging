@@ -9,6 +9,16 @@ public class SubscriberClient
      private const string BROKER_ADDRESS = "127.0.0.1";
      private const int BROKER_PORT = 5000;
      private readonly HashSet<string> processedMessageIds = new();
+     private long nextExpectedSequence = 1;
+
+     private readonly SortedDictionary<long, BufferedMessage>
+         outOfOrderBuffer = new();
+
+     private record BufferedMessage(
+         string MessageId,
+         long SequenceNumber,
+         string PublisherName,
+         string Content);
 
      public async Task StartAsync()
      {
